@@ -1,0 +1,225 @@
+// PostgreSQL is the single source of truth for payment state.
+// Tenant integrity is enforced by the database itself: every child row carries institutionId and references its
+// parent through a COMPOSITE foreign key (id, institutionId), so a row can never point at another tenant's parent.
+generator client {
+  provider   = "prisma-client-js"
+  // Rust-free client: queries are compiled by a WASM query compiler and executed through the `pg` driver adapter.
+  // No native query-engine binary is needed at runtime (smaller images, no OpenSSL/musl binary-target issues).
+  engineType = "client"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  STUDENT
+}
+
+enum PaymentStatus {
+  UNPAID
+  PAID
+  EXPIRED
+}
+
+enum TransactionType {
+  PAYMENT_SUCCESS @map("payment.success")
+  PAYMENT_EXPIRED @map("payment.expired")
+}
+
+enum ProcessingStatus {
+  PROCESSED
+  DUPLICATE
+  INVALID_SIGNATURE
+  INVALID_PAYLOAD
+  INVOICE_NOT_FOUND
+  AMOUNT_MISMATCH
+  INVALID_STATE
+  REQUIRES_REVIEW
+  EVENT_CONFLICT
+}
+
+model Institution {
+  id            String   @id @default(uuid()) @db.Uuid
+  code          String   @unique @db.VarChar(32)
+  name          String   @db.VarChar(200)
+  /// AES-256-GCM envelope ("v1:iv:tag:ciphertext"). Never serialised by any API response.
+  hmacSecretEnc String
+  createdAt     DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt     DateTime @updatedAt @db.Timestamptz(3)
+
+  users         User[]
+  students      Student[]
+  semesters     Semester[]
+  invoices      Invoice[]
+  transactions  Transaction[]
+  webhookEvents WebhookEvent[]
+}
+
+model Student {
+  id            String   @id @default(uuid()) @db.Uuid
+  institutionId String   @db.Uuid
+  nim           String   @db.VarChar(32)
+  name          String   @db.VarChar(200)
+  program       String   @db.VarChar(200)
+  faculty       String   @db.VarChar(200)
+  createdAt     DateTime @default(now()) @db.Timestamptz(3)
+
+  institution Institution @relation(fields: [institutionId], references: [id])
+  users       User[]
+  invoices    Invoice[]
+
+  @@unique([institutionId, nim])
+  @@unique([id, institutionId])
+}
+
+model User {
+  id            String   @id @default(uuid()) @db.Uuid
+  institutionId String   @db.Uuid
+  studentId     String?  @db.Uuid
+  /// Stored lower-case by the application; unique across the platform so login needs only email + password.
+  email         String   @unique @db.VarChar(254)
+  name          String   @db.VarChar(200)
+  role          Role
+  passwordHash  String
+  createdAt     DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt     DateTime @updatedAt @db.Timestamptz(3)
+
+  institution Institution @relation(fields: [institutionId], references: [id])
+  student     Student?    @relation(fields: [studentId, institutionId], references: [id, institutionId])
+
+  @@unique([studentId])
+  @@index([institutionId])
+}
+
+model Semester {
+  id            String  @id @default(uuid()) @db.Uuid
+  institutionId String  @db.Uuid
+  /// API value, e.g. "Ganjil 2026/2027".
+  value         String  @db.VarChar(64)
+  label         String  @db.VarChar(120)
+  current       Boolean @default(false)
+
+  institution Institution @relation(fields: [institutionId], references: [id])
+  invoices    Invoice[]
+
+  @@unique([institutionId, value])
+  @@unique([id, institutionId])
+}
+
+model Invoice {
+  id            String        @id @default(uuid()) @db.Uuid
+  institutionId String        @db.Uuid
+  studentId     String        @db.Uuid
+  semesterId    String        @db.Uuid
+  invoiceNumber String        @db.VarChar(64)
+  /// Whole rupiah. BigInt in the DB; converted to a JS number (safe up to 2^53) at the API boundary.
+  amount        BigInt
+  status        PaymentStatus @default(UNPAID)
+  issuedAt      DateTime      @db.Date
+  expiresAt     DateTime      @db.Date
+  paidAt        DateTime?     @db.Timestamptz(3)
+  createdAt     DateTime      @default(now()) @db.Timestamptz(3)
+  updatedAt     DateTime      @updatedAt @db.Timestamptz(3)
+
+  institution  Institution   @relation(fields: [institutionId], references: [id])
+  student      Student       @relation(fields: [studentId, institutionId], references: [id, institutionId])
+  semester     Semester      @relation(fields: [semesterId, institutionId], references: [id, institutionId])
+  transactions Transaction[]
+
+  /// Invoice numbers are unique PER institution, not globally.
+  @@unique([institutionId, invoiceNumber])
+  @@unique([id, institutionId])
+  @@index([institutionId, status, createdAt(sort: Desc)])
+  @@index([institutionId, studentId])
+}
+
+model WebhookEvent {
+  id               String           @id @default(uuid()) @db.Uuid
+  institutionId    String           @db.Uuid
+  institutionCode  String           @db.VarChar(32)
+  /// Values below come from the (verified or not) payload and are nullable when the payload was malformed.
+  eventId          String?          @db.VarChar(100)
+  eventType        String?          @db.VarChar(64)
+  invoiceNumber    String?          @db.VarChar(64)
+  amount           BigInt?
+  /// When the gateway says the event happened (payload.occurred_at). Distinct from receivedAt.
+  occurredAt       DateTime?        @db.Timestamptz(3)
+  receivedAt       DateTime         @default(now()) @db.Timestamptz(3)
+  /// The exact bytes received (bounded by the body-size limit). Contains no secrets.
+  rawBody          String
+  /// The X-Signature header value as received (a MAC, not a secret).
+  signature        String?          @db.VarChar(200)
+  signatureValid   Boolean
+  processingStatus ProcessingStatus
+  httpStatus       Int
+  errorMessage     String?
+  requestId        String?          @db.VarChar(64)
+
+  institution Institution  @relation(fields: [institutionId], references: [id])
+  transaction Transaction?
+
+  @@unique([id, institutionId])
+  @@index([institutionId, receivedAt(sort: Desc)])
+  @@index([institutionId, eventId])
+}
+
+model Transaction {
+  id              String          @id @default(uuid()) @db.Uuid
+  institutionId   String          @db.Uuid
+  invoiceId       String          @db.Uuid
+  webhookEventId  String          @db.Uuid
+  /// Gateway event_id; the idempotency key together with institutionId.
+  eventId         String          @db.VarChar(100)
+  type            TransactionType
+  amount          BigInt
+  resultingStatus PaymentStatus
+  occurredAt      DateTime        @db.Timestamptz(3)
+  createdAt       DateTime        @default(now()) @db.Timestamptz(3)
+
+  institution  Institution  @relation(fields: [institutionId], references: [id])
+  invoice      Invoice      @relation(fields: [invoiceId, institutionId], references: [id, institutionId])
+  webhookEvent WebhookEvent @relation(fields: [webhookEventId, institutionId], references: [id, institutionId])
+
+  /// Atomic idempotency: a gateway event can produce at most one transaction per institution, enforced by PostgreSQL.
+  @@unique([institutionId, eventId])
+  /// At most one transaction per webhook delivery.
+  @@unique([webhookEventId, institutionId])
+  @@index([institutionId, occurredAt(sort: Desc)])
+  @@index([invoiceId])
+}
+
+/// Restricted, platform-level audit trail for notifications that cannot be attributed to any tenant
+/// (unknown institution code, unparseable body). Deliberately NOT reachable from any tenant-facing endpoint.
+model PlatformSecurityEvent {
+  id                     String   @id @default(uuid()) @db.Uuid
+  receivedAt             DateTime @default(now()) @db.Timestamptz(3)
+  institutionCodeClaimed String?  @db.VarChar(64)
+  reason                 String   @db.VarChar(64)
+  httpStatus             Int
+  /// First 2 KB only, so an anonymous caller cannot grow the table quickly.
+  bodySnippet            String
+  sourceIp               String?  @db.VarChar(64)
+  requestId              String?  @db.VarChar(64)
+
+  @@index([receivedAt(sort: Desc)])
+}
+
+/// Table layout required by connect-pg-simple (sessions live in PostgreSQL, so API instances stay stateless).
+model Session {
+  sid    String   @id @db.VarChar
+  sess   Json     @db.Json
+  expire DateTime @db.Timestamp(6)
+
+  @@index([expire], map: "IDX_session_expire")
+  @@map("session")
+}
+
+/// Shared (cross-instance) fixed-window rate limiter state.
+model RateLimit {
+  key         String   @id @db.VarChar(200)
+  count       Int
+  windowStart DateTime @db.Timestamptz(3)
+}
