@@ -1,0 +1,14 @@
+node_modules/
+dist/
+coverage/
+.env
+.env.*
+!.env.example
+*.log
+playwright-report/
+test-results/
+*.tsbuildinfo
+.DS_Store
+
+# local AI context map (kept on disk, not part of the project)
+project_map.txt
