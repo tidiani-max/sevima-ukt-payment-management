@@ -1,0 +1,77 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    font-family: "Inter", system-ui, sans-serif;
+    color: #17223b;
+    background: #f5f7fb;
+    font-synthesis: none;
+    text-rendering: optimizeLegibility;
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    min-width: 320px;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  button:not(:disabled),
+  select {
+    cursor: pointer;
+  }
+
+  /* Visible keyboard focus everywhere (mouse clicks do not trigger it). */
+  :focus-visible {
+    outline: 2px solid #165dff;
+    outline-offset: 2px;
+  }
+
+  ::selection {
+    background: #dbe8ff;
+    color: #0f4ed8;
+  }
+}
+
+@layer components {
+  /* Status pills. Text colours meet WCAG AA (4.5:1) on their backgrounds; every pill also carries an icon and a text label. */
+  .status {
+    display: inline-flex;
+    align-items: center;
+    white-space: nowrap;
+    border-radius: 999px;
+    padding: 4px 10px;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.25;
+  }
+  .status-paid {
+    color: #065f46;
+    background: #d1fae5;
+  }
+  .status-unpaid {
+    color: #9a3412;
+    background: #ffedd5;
+  }
+  .status-expired {
+    color: #991b1b;
+    background: #fee2e2;
+  }
+  .status-neutral {
+    color: #334155;
+    background: #e2e8f0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}
